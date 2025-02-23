@@ -1,0 +1,90 @@
+#!/bin/bash
+# Exit if AI environment variable is not set to 1
+if [[ "$AI" != "1" ]]; then
+    exit 0
+fi
+
+# Get both the status and diff of staged changes
+status_output=$(git status --porcelain)
+diff_output=$(git diff --cached)
+
+if [ -z "$diff_output" ] && [ -z "$status_output" ]; then
+    echo "No staged changes found."
+    exit 1
+fi
+
+# Gemini API configuration
+GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+if [ -z "$GEMINI_API_KEY" ]; then
+    echo "Error: GEMINI_API_KEY environment variable not set"
+    exit 1
+fi
+
+GEMINI_ENDPOINT="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+# Include context if C environment variable is set
+context_prompt=""
+if [ -n "$C" ]; then
+    context_prompt="Additional context about these changes: ${C}"
+fi
+
+# Escape the outputs for JSON
+escaped_status=$(echo "$status_output" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+escaped_diff=$(echo "$diff_output" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+
+# Create a temporary file for the request payload
+temp_file=$(mktemp)
+trap 'rm -f "$temp_file"' EXIT
+
+# Generate the prompt and write to temp file
+cat > "$temp_file" << EOF
+{
+    "contents": [{
+        "parts":[{
+            "text": "I am going to show you a git status and diff. Generate a commit message following the Conventional Commits specification with these requirements:
+1. First line format should be: <type>(<optional scope>): <short description>
+   - Types: feat, fix, docs, style, refactor, test, chore, ci, build, perf
+   - If files are being moved/renamed, consider using 'refactor' type
+   - If new files are being added, consider if this is a new 'feat' or supporting files for existing feature
+   - Scope should be derived from the context if provided (e.g., JIRA ticket, feature name)
+   - Description should be clear and concise (max 72 chars for full line)
+2. Leave one blank line after the first line if adding body text, only add body text if its necessary, small changes dont need one
+3. Body text should explain the what and why of the changes:
+   - For large changes, ensure ALL significant modifications are mentioned
+   - Use bullet points to break down different aspects of the change
+   - Include all important files or components that were modified
+   - Explain architectural decisions if present
+   - If refactoring, explain the motivation
+   - No change should be too small to mention if it's significant
+   - Not overly long lines
+
+${context_prompt}
+
+File status:
+${escaped_status}
+
+Here is the diff:
+${escaped_diff}"
+        }]
+    }]
+}
+EOF
+
+# Send request to Gemini API
+full_response=$(curl -s \
+    "${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    -d @"$temp_file")
+
+# Extract the commit message
+response=$(echo "$full_response" | grep -o '"text": *"[^"]*"' | sed 's/"text": *"\(.*\)"/\1/' | head -n 1)
+
+if [ -z "$response" ]; then
+    echo "Failed to generate commit message. API Response:"
+    echo "$full_response"
+    exit 1
+fi
+
+# Write the commit message to the commit message file
+echo -e "$response" > "$1"
