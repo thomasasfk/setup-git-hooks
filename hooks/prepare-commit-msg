@@ -1,6 +1,13 @@
 #!/bin/bash
+set -e
+
 if [[ "$AI" != "1" ]]; then
     exit 0
+fi
+
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is required but not installed"
+    exit 1
 fi
 
 status_output=$(git status --porcelain)
@@ -11,70 +18,72 @@ if [ -z "$diff_output" ] && [ -z "$status_output" ]; then
     exit 1
 fi
 
-GEMINI_API_KEY="${GEMINI_API_KEY:-}"
-if [ -z "$GEMINI_API_KEY" ]; then
-    echo "Error: GEMINI_API_KEY environment variable not set"
-    exit 1
-fi
+prompt="Generate a single git commit message for these changes following Conventional Commits:
+- First line must be: <type>(<scope/jira-id>): <short description> (max 72 chars)
+- Types: feat, fix, docs, style, refactor, test, chore, ci, build, perf
+- Keep file lengths short, use a new line if we get to 100 characters
+- Use dashes instead of stars if using bullet points
+- Add body only if needed to explain complex changes
+- Try and explain everything that has changed, but short
+- Use bullet points for multiple changes
+- Keep it concise unless explaining big changes
 
-GEMINI_ENDPOINT="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+Status:
+${status_output}
 
-context_prompt=""
+Diff:
+${diff_output}"
+
 if [ -n "$C" ]; then
-    context_prompt="Additional context about these changes: ${C}"
+    prompt="Context: ${C}
+
+${prompt}"
 fi
 
-escaped_status=$(echo "$status_output" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-escaped_diff=$(echo "$diff_output" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+. ~/.bashrc
+shopt -s expand_aliases
+if alias gemini 2>/dev/null; then
+    echo "Using Gemini CLI tool..."
+    if ! response=$(gemini "$prompt" 2>&1); then  # 2>&1 captures both stdout and stderr
+        # echo "CLI tool failed with error: $response"
+        echo "Gemini failed, falling back to API..."
+        CLI_FAILED=1
+    fi
+else
+    echo "Not using Gemini cli tool..."
+    CLI_FAILED=1
+fi
 
-temp_file=$(mktemp)
-trap 'rm -f "$temp_file"' EXIT
+if [ "${CLI_FAILED}" = "1" ]; then
+    GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+    if [ -z "$GEMINI_API_KEY" ]; then
+        echo "Error: GEMINI_API_KEY environment variable not set"
+        exit 1
+    fi
 
-cat > "$temp_file" << EOF
-{
-    "contents": [{
-        "parts":[{
-            "text": "I am going to show you a git status and diff. Generate a commit message following the Conventional Commits specification with these requirements:
-1. First line format should be: <type>(<optional scope>): <short description>
-   - Types: feat, fix, docs, style, refactor, test, chore, ci, build, perf
-   - If files are being moved/renamed, consider using 'refactor' type
-   - If new files are being added, consider if this is a new 'feat' or supporting files for existing feature
-   - Scope should be derived from the context if provided (e.g., JIRA ticket, feature name)
-   - Description should be clear and concise (max 72 chars for full line)
-2. Leave one blank line after the first line if adding body text, only add body text if its necessary, small changes dont need one
-3. Body text should explain the what and why of the changes:
-   - For large changes, ensure ALL significant modifications are mentioned
-   - Use bullet points to break down different aspects of the change
-   - Include all important files or components that were modified
-   - Explain architectural decisions if present
-   - If refactoring, explain the motivation
-   - No change should be too small to mention if it's significant
-   - Not overly long lines
+    GEMINI_ENDPOINT="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-${context_prompt}
+    json_payload=$(jq -n \
+        --arg prompt "$prompt" \
+        '{
+            contents: [{
+                parts: [{
+                    text: $prompt
+                }]
+            }]
+        }')
 
-File status:
-${escaped_status}
+    response=$(curl -s \
+        "${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -X POST \
+        -d "$json_payload" | \
+        jq -r '.candidates[0].content.parts[0].text // empty')
 
-Here is the diff:
-${escaped_diff}"
-        }]
-    }]
-}
-EOF
-
-full_response=$(curl -s \
-    "${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -X POST \
-    -d @"$temp_file")
-
-response=$(echo "$full_response" | grep -o '"text": *"[^"]*"' | sed 's/"text": *"\(.*\)"/\1/' | head -n 1)
-
-if [ -z "$response" ]; then
-    echo "Failed to generate commit message. API Response:"
-    echo "$full_response"
-    exit 1
+    if [ -z "$response" ]; then
+        echo "Failed to generate commit message."
+        exit 1
+    fi
 fi
 
 echo -e "$response" > "$1"
