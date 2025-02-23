@@ -1,3 +1,0 @@
-#!/bin/bash
-echo "Running global pre-commit hook..."
-exit 0
