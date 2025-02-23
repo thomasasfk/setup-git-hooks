@@ -12,5 +12,3 @@ fi
 
 cp -r "${template_dir}"/* .git/hooks/
 chmod +x .git/hooks/*
-echo "Applied global hooks to this repository"
-
