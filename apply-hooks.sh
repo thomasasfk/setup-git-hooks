@@ -1,6 +1,4 @@
 #!/bin/bash
-# Script to apply global hooks to an existing repository
-
 if [ ! -d ".git" ]; then
     echo "Error: Not a git repository"
     exit 1
@@ -15,3 +13,4 @@ fi
 cp -r "${template_dir}"/* .git/hooks/
 chmod +x .git/hooks/*
 echo "Applied global hooks to this repository"
+
